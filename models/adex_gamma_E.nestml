@@ -1,0 +1,95 @@
+neuron adex_gamma_E:
+
+    state:
+        V_m mV = -70 mV      # Membrane potential
+        w pA = 0 pA        # Spike-adaptation current
+        r integer = 0 # Counts number of tick during the refractory period
+
+        g_NMDA real = 0
+        g_NMDA$ real = g_NMDA_const * (1 / tau_syn_rise_NMDA - 1 / tau_syn_decay_NMDA)
+
+    equations:
+
+        inline V_bounded mV = min(V_m, V_peak) # prevent exponential divergence
+
+        inline B = 1/(1+exp(-0.062*V_bounded)*(Mg/3.57))
+
+        kernel g_GABA = exp(-t/tau_decay_gaba) # inputs from the GABA conductance.
+        kernel g_AMPA = exp(-t/tau_decay_ampa) # inputs from the AMPA conductance
+        kernel g_NMDA' = g_ex$ - g_ex / tau_syn_rise_NMDA,
+               g_NMDA$' = -g_ex$ / tau_syn_decay_NMDA
+
+        #kernel g_NMDA = G_max_NMDA_e * # inputs from the NMDA conductance (approx)
+
+        inline I_AMPA = convolve(g_AMPA, exc_spikes) * nS * (V_bounded - E_e)
+        inline I_GABA = convolve(g_GABA, inh_spikes) * nS  (V_bounded - E_i)
+        inline I_NMDA = convolve(g_NMDA, exc_spikes) * nS * (V_bounded - E_e) * B
+
+        inline I_syn = I_AMPA + I_NMDA + I_GABA
+
+        V_m' = (-g_L * (V_bounded - E_L) + g_L * Delta_T * exp((V_bounded-V_th)/Delta_T) - w - I_syn) / C_m
+        w' = (a * (V_bounded - E_L) - w) / tau_w
+
+#parameters done
+    parameters:
+        # membrane parameters
+        C_m pF = 150.0 pF         # Membrane Capacitance
+        t_ref ms = 5.0 ms         # Refractory period
+        V_reset mV = -65.0 mV     # Reset Potential
+        g_L nS = 10.0 nS          # Leak Conductance
+        E_L mV = -65.0 mV         # Leak reversal Potential (aka resting potential)
+
+        # spike adaptation parameters
+        a nS = 4 nS               # Subthreshold adaptation
+        b pA = 20 pA            # Spike-triggered adaptation
+        Delta_T mV = 2.0 mV       # Slope factor
+        tau_w ms = 500 ms       # Adaptation time constant
+        V_th mV = -40 mV        # Threshold Potential
+        V_peak mV = 0 mV          # Spike detection threshold
+
+        #Reversal potential of synapses
+
+        E_e mV = 0 mV
+        E_i mV = -80 mV
+
+        # Time decay constants
+        tau_decay_AMPA ms = 1.5 ms
+        tau_decay_GABA ms = 7.5 ms
+
+        #NMDA paramters
+
+        # G_NMDA_max_e nS = 2.5 nS
+        # G_NMDA_max_i nS = 0.5 nS
+        Mg mM = 1 mM
+        tau_syn_rise_NMDA ms = 2 ms    # Synaptic time constant excitatory synapse
+        tau_syn_decay_NMDA ms = 200 ms
+
+
+    internals:
+
+        t_peak_NMDA real = tau_syn_decay_E * tau_syn_rise_E * ln(tau_syn_decay_E / tau_syn_rise_E) / (tau_syn_decay_E - tau_syn_rise_E)
+        g_NMDA_const real = 1 / (exp(-t_peak_NMDA / tau_syn_decay_NMDA) - exp(-t_peak_NMDA / tau_syn_rise_NMDA))
+
+        # refractory time in steps
+        RefractoryCounts
+        integer = steps(t_ref)
+
+    input:
+        inh_spikes <- inhibitory spike
+        exc_spikes <- excitatory spike
+        I_stim pA <- continuous
+
+    output:
+        spike
+
+    update:
+        integrate_odes()
+
+        if r > 0: # refractory
+            r -= 1 # decrement refractory ticks count
+            V_m = V_reset # clamp potential
+        elif V_m >= V_peak: # threshold crossing detection
+            r = RefractoryCounts
+            V_m = V_reset # clamp potential
+            w += b
+            emit_spike()
